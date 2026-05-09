@@ -9,6 +9,7 @@ from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
+from aiohttp import web
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -23,7 +24,9 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set.")
 
-BOT_USERNAME = "vanillacardexbot"
+PORT = int(os.environ.get("PORT", 8080))
+
+BOT_USERNAME = "Vanilacard_bot"
 ADMIN_ID = 8508012498
 
 CARD_BINS = {
@@ -78,10 +81,10 @@ USDT_ADDRESSES = [
 
 
 class StickerType(Enum):
-    NONE    = ""
+    NONE     = ""
     RELISTED = "🔄"
-    GOOGLE  = "🅶"
-    PAYPAL  = "🅿"
+    GOOGLE   = "🅶"
+    PAYPAL   = "🅿"
 
 
 @dataclass
@@ -313,8 +316,8 @@ def deposit_choice_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-card_gen  = CardGenerator()
-user_mgr  = UserManager()
+card_gen = CardGenerator()
+user_mgr = UserManager()
 
 
 def is_update_time() -> bool:
@@ -799,39 +802,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Use /help for assistance.")
 
 
+# ───── HEALTH CHECK HTTP SERVER ─────
+# Render.com requires a web service to bind to a port.
+# This lightweight server satisfies that requirement.
+
+async def health_check(request):
+    return web.Response(text="OK", status=200)
+
+
+async def run_http_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"Health check server running on port {PORT}")
+
+
 # ───── MAIN ─────
 
 async def main():
     print("Starting Vanila Exchange Bot...")
     await card_gen.update_cards()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Start the HTTP health check server so Render.com detects an open port
+    await run_http_server()
 
-    app.add_handler(CommandHandler("start",        cmd_start))
-    app.add_handler(CommandHandler("listings",     cmd_stock))
-    app.add_handler(CommandHandler("cents_listing",cmd_cents))
-    app.add_handler(CommandHandler("profile",      cmd_profile))
-    app.add_handler(CommandHandler("balance",      cmd_balance))
-    app.add_handler(CommandHandler("withdraw",     cmd_withdraw))
-    app.add_handler(CommandHandler("deposit",      cmd_deposit))
-    app.add_handler(CommandHandler("help",         cmd_help))
-    app.add_handler(CommandHandler("refund_rules", cmd_refund_rules))
-    app.add_handler(CommandHandler("ref",          cmd_refer))
-    app.add_handler(CommandHandler("admin",        cmd_admin))
+    tg_app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    tg_app.add_handler(CommandHandler("start",         cmd_start))
+    tg_app.add_handler(CommandHandler("listings",      cmd_stock))
+    tg_app.add_handler(CommandHandler("cents_listing", cmd_cents))
+    tg_app.add_handler(CommandHandler("profile",       cmd_profile))
+    tg_app.add_handler(CommandHandler("balance",       cmd_balance))
+    tg_app.add_handler(CommandHandler("withdraw",      cmd_withdraw))
+    tg_app.add_handler(CommandHandler("deposit",       cmd_deposit))
+    tg_app.add_handler(CommandHandler("help",          cmd_help))
+    tg_app.add_handler(CommandHandler("refund_rules",  cmd_refund_rules))
+    tg_app.add_handler(CommandHandler("ref",           cmd_refer))
+    tg_app.add_handler(CommandHandler("admin",         cmd_admin))
 
-    if app.job_queue:
-        app.job_queue.run_daily(job_daily_update, time=time(hour=3, minute=0, second=0))
-        app.job_queue.run_repeating(job_hourly_sold_out, interval=3600, first=3600)
+    tg_app.add_handler(CallbackQueryHandler(handle_callback))
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    if tg_app.job_queue:
+        tg_app.job_queue.run_daily(job_daily_update, time=time(hour=3, minute=0, second=0))
+        tg_app.job_queue.run_repeating(job_hourly_sold_out, interval=3600, first=3600)
         print("Scheduled: daily card refresh at 03:00, hourly 1.5% sold-out marking")
 
     print(f"Bot ready — {len(card_gen.cards)} cards loaded")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
+    await tg_app.initialize()
+    await tg_app.start()
+    await tg_app.updater.start_polling()
 
+    # Keep running forever
     while True:
         await asyncio.sleep(3600)
 
